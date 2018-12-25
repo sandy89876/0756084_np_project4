@@ -5,6 +5,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <sys/types.h>
+#include <netdb.h>
+#include <errno.h>
 
 #include <strings.h>
 #include <string.h>
@@ -21,9 +23,10 @@ int client_port;
 string client_ip;
 
 //variable for sock4 request
+uint8_t test[2];
 unsigned char VN, CD, buffer[buffersize+1];
-unsigned int dest_ip, dest_port;
-uint16_t dest_bind_port;
+uint8_t dest_ip[4];
+uint16_t dest_bind_port,dest_port;
 string dest_ip_arr[4];//['140','113','x','x']
 string formatted_dest_ip;//140.113.x.x
 char* user_id;
@@ -37,7 +40,7 @@ void send_reply(unsigned char cd);
 int redirect_msg(int src_fd, int dest_fd);
 void connect_mode_handler();
 void browser_handler();
-void relay_traffic(int src_socket, int dest_socket, int fdmax, fd_set all_fds);
+void relay_traffic(int src_socket, int dest_socket, int fdmax, fd_set &all_fds);
 void bind_mode_handler();
 int create_bind_mode_sock();
 bool pass_firewall();
@@ -81,7 +84,6 @@ int main(int argc, const char * argv[]){
     while(1){
     	size_t clilen = sizeof(cli_addr);
         browser_socket = accept(socketfd, (struct sockaddr *)&cli_addr, (socklen_t*)&clilen);
-        
         client_ip = inet_ntoa(cli_addr.sin_addr);
         client_port = (int)ntohs(cli_addr.sin_port);
 
@@ -142,31 +144,29 @@ void show_server_message(){
 int create_conn_to_dest(){
     struct sockaddr_in client_sin;
     int client_fd;
-
     client_fd = socket(AF_INET, SOCK_STREAM, 0);
     if(client_fd < 0){
         printf("create local client error\n");
         return -1;
     }
-
     bzero(&client_sin, sizeof(client_sin));
     client_sin.sin_family = AF_INET;
     client_sin.sin_addr.s_addr = inet_addr(formatted_dest_ip.c_str());
     client_sin.sin_port = htons(dest_port);
-
-    if(connect(client_fd, (struct sockaddr *)&client_sin, sizeof(client_sin)) < 0){
-        printf("connect error\n");
+    cout << "dest_ip= " <<formatted_dest_ip << " dest_port = " << dest_port << endl;
+    if(connect(client_fd, (struct sockaddr *)&client_sin, sizeof(client_sin)+1) < 0){
+        printf("connect error\nerrorno=%d",errno);
         return -1;
     }
-
     return client_fd;
 }
 
 void parse_socks4_request(char *buf){
     VN = buf[0];
     CD = buf[1];
-    dest_port = buf[2] << 8 | buf[3];
-    dest_ip = buf[4] << 24 | buf[5] << 16 | buf[6] << 8 | buf[7];
+    test[0] = buf[2];
+    test[1] = buf[3];
+    dest_port = test[0] * 256 + test[1];
     user_id = buf + 8;
     
     if(CD == 1){
@@ -175,15 +175,13 @@ void parse_socks4_request(char *buf){
         cur_mode = "b";
     }
 
-    cout << "dest_ip = ";
     for(int i=0; i<4; i++){
-        dest_ip_arr[i] = to_string((dest_ip >> (24-8*i)) & 0xff);
+        dest_ip[i] = buf[4+i];
+        dest_ip_arr[i] = to_string(dest_ip[i]);
         formatted_dest_ip += (dest_ip_arr[i] + ".");
-        cout << dest_ip_arr[i] << " ";
     }
     formatted_dest_ip = formatted_dest_ip.substr(0,formatted_dest_ip.length()-1);
     cout << "formatted_dest_ip= " << formatted_dest_ip << endl;
-    cout << endl;
 }
 
 bool pass_firewall(){
@@ -200,6 +198,7 @@ bool pass_firewall(){
             cout << "rule:" << line << endl;
 
             vector<string> rule_arg = split_line(line, " ");
+            vector<string> src_ip = split_line(client_ip, ".");
             string rule = rule_arg[0];
             string rule_mod = rule_arg[1];
             string rule_ip = rule_arg[2];
@@ -211,6 +210,7 @@ bool pass_firewall(){
             vector<string> rule_ips = split_line(rule_ip, ".");
             bool ip_passed = true;
             for(vector<string>::iterator it = rule_ips.begin(); it != rule_ips.end(); ++it){
+                // cout << "*it = " << *it << " and dest_ip_arr[it - rule_ips.begin()] = " << dest_ip_arr[it - rule_ips.begin()] << endl;
                 if(*it != "*" && *it != dest_ip_arr[it - rule_ips.begin()]){
                     ip_passed = false;
                     break;
@@ -233,10 +233,10 @@ void send_reply(unsigned char cd){
     if(cur_mode == "c"){
         package[2] = dest_port / 256;
         package[3] = dest_port % 256;
-        package[4] = dest_ip >> 24;
-        package[5] = (dest_ip >> 16) & 0xFF;
-        package[6] = (dest_ip >> 8) & 0xFF;
-        package[7] = dest_ip & 0xFF;
+        package[4] = dest_ip[0];
+        package[5] = dest_ip[1];
+        package[6] = dest_ip[2];
+        package[7] = dest_ip[3];
     }else if(cur_mode == "b"){
         package[2] = (dest_bind_port / 256) & 0xff;
         package[3] = (dest_bind_port % 256) & 0xff;
@@ -258,28 +258,37 @@ void send_reply(unsigned char cd){
 
 int redirect_msg(int src_fd, int dest_fd){
     int n;
-    n = read(src_fd, buffer, buffersize);
-    if(n <= 0) {
+    memset(buffer, 0, buffersize);
+    n = read(src_fd, buffer, buffersize-1);
+    if(n < 0) {
         cout << "src_fd read error" << endl;
+        perror("read eerr");
         return -1;
-        //continue;
+    }else if(n == 0){
+        return 0;
     }
     cout << "<Content>\t:" << buffer;
 
     //write back to browser client
     n = write(dest_fd, buffer, sizeof(unsigned char)*n);
-    if(n <= 0){
+    if(n < 0){
         printf("dest_fd write error\n");
         return -1;
+    }else if(n == 0){
+        return 0;
     }
-    return 0;
+    return 1;
 }
 
-void relay_traffic(int src_socket, int dest_socket, int fdmax, fd_set all_fds){
+void relay_traffic(int src_socket, int dest_socket, int fdmax, fd_set &all_fds){
+    cout << "relay traffic src_socket = " << src_socket << " dest_socket = " << dest_socket << endl;
     fd_set tmp_fds;
-    FD_ZERO(&tmp_fds);
+    int conn = 2;
     while(1){
-        tmp_fds = all_fds;
+        // tmp_fds = all_fds;
+        FD_ZERO(&tmp_fds);
+        memcpy(&tmp_fds, &all_fds, sizeof(tmp_fds));
+        int dest_status, browser_status;
         if(select(fdmax+1, &tmp_fds, NULL, NULL, NULL) == -1){
             if(errno == EINTR){
                 continue;
@@ -291,16 +300,32 @@ void relay_traffic(int src_socket, int dest_socket, int fdmax, fd_set all_fds){
 
         if(FD_ISSET(dest_socket, &tmp_fds)){
             //redirect msg from dest_host to browser
-            int status = redirect_msg(dest_socket, src_socket);
-            if(status < 0)  break;
+            cout << "redirect from dest_host" << endl;
+            dest_status = redirect_msg(dest_socket, src_socket);
+            if(dest_status < 0){
+                break;
+            }else if(dest_status == 0){
+                conn--;
+                FD_CLR(dest_socket, &all_fds);
+            }
         }
         
         if(FD_ISSET(src_socket, &tmp_fds)){
             //recv msg from browser
-            int status = redirect_msg(src_socket, dest_socket);
-            if(status < 0)  break;
+            cout << "redirect from browser" << endl;
+            browser_status = redirect_msg(src_socket, dest_socket);
+            if(browser_status < 0){
+                break;
+            }else if(browser_status == 0){
+                conn--;
+                FD_CLR(src_socket, &all_fds);
+            }
         }
+
+        if(conn == 0)break;
+
     }
+    
     close(dest_socket);
 }
 
@@ -309,11 +334,9 @@ void connect_mode_handler(){
     int dest_host_socket = create_conn_to_dest();
 
     fd_set all_fds;
-    // fd_set tmp_fds;
     int fdmax;
 
     FD_ZERO(&all_fds);
-    // FD_ZERO(&tmp_fds);
     FD_SET(browser_socket, &all_fds);
     FD_SET(dest_host_socket,&all_fds);
 
@@ -324,6 +347,7 @@ void connect_mode_handler(){
     }
 
     show_server_message();
+    cout << "browser_socket = " << browser_socket << " dest_host_socket = " << dest_host_socket << endl;
     relay_traffic(browser_socket, dest_host_socket, fdmax, all_fds);
     cout << "=====connect mode end=====" << endl;
 }
@@ -412,7 +436,8 @@ void bind_mode_handler(){
 void browser_handler(){
     int n;
     char buf[buffersize];
-    n = read(browser_socket,buf,sizeof(buf));
+    //[todo] read until null
+    n = read(browser_socket,buf,8);
     if(n < 8){
         printf("read sock4 error\n");
         return;
