@@ -35,8 +35,6 @@ string cur_mode;
 string reply;
 
 vector<string> split_line(string input,string delimeter);
-int readUntilNull(int fd, char *str, int maxlen);
-void sig_handler(int signo);
 int create_conn_to_dest();
 void send_reply(unsigned char cd);
 int redirect_msg(int src_fd, int dest_fd);
@@ -81,8 +79,6 @@ int main(int argc, const char * argv[]){
     int tmp = listen(socketfd, 10);
     printf("Server: listen\n");
 
-    signal(SIGCHLD, sig_handler);
-
     while(1){
     	size_t clilen = sizeof(cli_addr);
         browser_socket = accept(socketfd, (struct sockaddr *)&cli_addr, (socklen_t*)&clilen);
@@ -123,33 +119,6 @@ vector<string> split_line(string input,string delimeter){
     return result;
 }
 
-int readUntilNull(int fd, char *str, int maxlen){
-    int n, rc;
-    char c;
-    for(n = 1; n < maxlen; ++n){
-        if((rc = read(fd, &c, 1))==1){
-            if(c == '\0') break;
-            *str++ = c;
-        }
-        else if(rc == 0){
-            if(n == 1) return 0;
-            else break;
-        }
-        else return -1;
-    }
-    *str = 0;
-    return n;
-}
-
-void sig_handler(int signo){
-    int status;
-    
-    //for waiting child process
-    if(signo == SIGCHLD){
-        waitpid(0, &status, WNOHANG);
-    }
-}
-
 void show_server_message(){
     cout << "<S_IP>\t:" << client_ip << endl;
     cout << "<S_PORT>\t:" << to_string(client_port) << endl;
@@ -175,7 +144,7 @@ int create_conn_to_dest(){
     client_sin.sin_family = AF_INET;
     client_sin.sin_addr.s_addr = inet_addr(formatted_dest_ip.c_str());
     client_sin.sin_port = htons(dest_port);
-    cout << "dest_ip= " <<formatted_dest_ip << " dest_port = " << dest_port << endl;
+    // cout << "dest_ip= " <<formatted_dest_ip << " dest_port = " << dest_port << endl;
     if(connect(client_fd, (struct sockaddr *)&client_sin, sizeof(client_sin)+1) < 0){
         printf("connect error\nerrorno=%d",errno);
         return -1;
@@ -184,12 +153,6 @@ int create_conn_to_dest(){
 }
 
 void parse_socks4_request(char *buf){
-    /*
-    for(int i=0; i<10;i++){
-        cout << "receive: " << uint8_t(buf[i]) << endl;
-    }*/
-    
-    cout << "buf length:" << sizeof(buf) << endl;
     VN = buf[0];
     CD = buf[1];
     test[0] = buf[2];
@@ -202,7 +165,7 @@ void parse_socks4_request(char *buf){
     }else if(CD == 2){
         cur_mode = "b";
     }
-
+    cout << "cur_mode = " << cur_mode << endl;
     for(int i=0; i<4; i++){
         dest_ip[i] = buf[4+i];
         dest_ip_arr[i] = to_string(dest_ip[i]);
@@ -223,7 +186,7 @@ bool pass_firewall(){
         while(!file.eof()){
             file.getline(buf, sizeof(buf));
             string line(buf);
-            cout << "rule:" << line << endl;
+            // cout << "rule:" << line << endl;
 
             vector<string> rule_arg = split_line(line, " ");
             string rule = rule_arg[0];
@@ -279,28 +242,20 @@ void send_reply(unsigned char cd){
         package[6] = 0;
         package[7] = 0;
     }
-    
-    int n = write(browser_socket, package, 8);
-    cout << "send reply n = " << n << endl;
+    write(browser_socket, package, 8);
 }
 
 int redirect_msg(int src_fd, int dest_fd){
     int n;
     memset(buffer, 0, BUFFER_SIZE);
-    // n = read(src_fd, buffer, sizeof(buffer));
-    while((n = recv(src_fd,buffer,sizeof(buffer),0)) <= 0){
-        sleep(100);
-        cout << "*****redirect_msg n <= 0"<< endl;
-    }
-    
-    cout << "*****redirect_msg n = " << n << endl;
+    n = read(src_fd, buffer, sizeof(buffer));
     if(n <= 0) {
-        cout << "src_fd read <=0" << endl;
-        perror("read eerr");
+        // cout << "src_fd read <=0" << endl;
+        // perror("read eerr");
         return -1;
     }
 
-    cout << "<Content>\t:" << buffer;
+    // cout << "<Content>\t:" << buffer;
 
     //write back to browser client
     n = write(dest_fd, buffer, sizeof(unsigned char)*n);
@@ -312,7 +267,7 @@ int redirect_msg(int src_fd, int dest_fd){
 }
 
 void relay_traffic(int src_socket, int dest_socket, int fdmax, fd_set &all_fds){
-    cout << "relay traffic src_socket = " << src_socket << " dest_socket = " << dest_socket << endl;
+    // cout << "*** start relay traffic between " << src_socket << " and " << dest_socket << endl;
     fd_set tmp_fds;
     int conn = 2;
     while(conn > 0){
@@ -327,23 +282,19 @@ void relay_traffic(int src_socket, int dest_socket, int fdmax, fd_set &all_fds){
 
         if(FD_ISSET(dest_socket, &tmp_fds)){
             //redirect msg from dest_host to browser
-            cout << "redirect from dest_host" << endl;
             dest_status = redirect_msg(dest_socket, src_socket);
             if(dest_status <= 0){
                 conn--;
                 FD_CLR(dest_socket, &all_fds);
-                cout << "fd_CLR " << dest_socket << endl;
             }
         }
         
         if(FD_ISSET(src_socket, &tmp_fds)){
             //recv msg from browser
-            cout << "redirect from browser" << endl;
             browser_status = redirect_msg(src_socket, dest_socket);
             if(browser_status <= 0){
                 conn--;
                 FD_CLR(src_socket, &all_fds);
-                cout << "fd_CLR " << src_socket << endl;
             }
         }
     }
@@ -369,7 +320,6 @@ void connect_mode_handler(){
     }
 
     show_server_message();
-    cout << "browser_socket = " << browser_socket << " dest_host_socket = " << dest_host_socket << endl;
     relay_traffic(browser_socket, dest_host_socket, fdmax, all_fds);
     cout << "=====connect mode end=====" << endl;
 }
@@ -382,7 +332,6 @@ int create_bind_mode_sock(){
         printf("caanot create bindmode socket\n");
         return -1;
     }
-    printf("create bindmode socket\n");
 
     bzero((char *)&bind_addr, sizeof(bind_addr));
     bind_addr.sin_family = AF_INET;
@@ -401,14 +350,13 @@ int create_bind_mode_sock(){
         printf("can't bind any port\n");
         return -1;
     }
-    printf("bind port success\n");
+
 
     if(listen(bind_mode_sock, 5) < 0){
         printf("can't listen on port\n");
         return -1;
     }
 
-    printf("bindmode server wait for connection\n\n");
     return bind_mode_sock;
 }
 
@@ -436,6 +384,7 @@ void bind_mode_handler(){
         puts("Server : Accept ftp connection failed");
         return;
     }
+
     send_reply(90);
 
     //start relaying traffic
@@ -451,6 +400,8 @@ void bind_mode_handler(){
     }else{
         fdmax = browser_socket;
     }
+
+    show_server_message();
     relay_traffic(browser_socket, ftp_sock, fdmax, all_fds);
     cout << "=====bind mode end=====" << endl;
 }
@@ -458,16 +409,12 @@ void bind_mode_handler(){
 void browser_handler(){
     int n;
     char buf[BUFFER_SIZE];
-    // n = read(browser_socket,buf,sizeof(buf));
     n = recv(browser_socket,buf,sizeof(buf),0);
-    cout << "read n=" << n << endl;
+
     if(n < 8){
         printf("read sock4 error\n");
         return;
     }
-    // n = readUntilNull(browser_socket, user_id, BUFFER_SIZE -1);
-    // cout << "n = " << n << " user_id = " << user_id << endl;
-    // cout << buf << endl;
     parse_socks4_request(buf);
     if(!pass_firewall()){
         //send reject reply
