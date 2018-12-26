@@ -15,7 +15,7 @@
 
 using namespace std;
 
-#define buffersize 20000
+#define BUFFER_SIZE 20000
 
 int socketfd;
 int browser_socket;
@@ -24,7 +24,8 @@ string client_ip;
 
 //variable for sock4 request
 uint8_t test[2];
-unsigned char VN, CD, buffer[buffersize+1];
+unsigned char VN, CD;
+char buffer[BUFFER_SIZE];
 uint8_t dest_ip[4];
 uint16_t dest_bind_port,dest_port;
 string dest_ip_arr[4];//['140','113','x','x']
@@ -33,7 +34,8 @@ char* user_id;
 string cur_mode;
 string reply;
 
-vector<string> split_line(string input,char* delimeter);
+vector<string> split_line(string input,string delimeter);
+int readUntilNull(int fd, char *str, int maxlen);
 void sig_handler(int signo);
 int create_conn_to_dest();
 void send_reply(unsigned char cd);
@@ -106,17 +108,38 @@ int main(int argc, const char * argv[]){
     }
 }
 
-vector<string> split_line(string input,char* delimeter){
+vector<string> split_line(string input,string delimeter){
+    char *_delimeter = new char[delimeter.length() + 1];
+    strcpy(_delimeter, delimeter.c_str());
+
     char *comm = new char[input.length()+1];
     strcpy(comm, input.c_str());
     
-    char* token = strtok(comm, delimeter);
+    char* token = strtok(comm, _delimeter);
     vector<string> result;
     while(token != NULL){
         result.push_back(token);
-        token = strtok(NULL, delimeter);
+        token = strtok(NULL, _delimeter);
     }
     return result;
+}
+
+int readUntilNull(int fd, char *str, int maxlen){
+    int n, rc;
+    char c;
+    for(n = 1; n < maxlen; ++n){
+        if((rc = read(fd, &c, 1))==1){
+            if(c == '\0') break;
+            *str++ = c;
+        }
+        else if(rc == 0){
+            if(n == 1) return 0;
+            else break;
+        }
+        else return -1;
+    }
+    *str = 0;
+    return n;
 }
 
 void sig_handler(int signo){
@@ -162,13 +185,19 @@ int create_conn_to_dest(){
 }
 
 void parse_socks4_request(char *buf){
+    /*
+    for(int i=0; i<10;i++){
+        cout << "receive: " << uint8_t(buf[i]) << endl;
+    }*/
+    
+    cout << "buf length:" << sizeof(buf) << endl;
     VN = buf[0];
     CD = buf[1];
     test[0] = buf[2];
     test[1] = buf[3];
     dest_port = test[0] * 256 + test[1];
     user_id = buf + 8;
-    
+    cout << "dest_port= " << dest_port << endl;
     if(CD == 1){
         cur_mode = "c";
     }else if(CD == 2){
@@ -198,7 +227,6 @@ bool pass_firewall(){
             cout << "rule:" << line << endl;
 
             vector<string> rule_arg = split_line(line, " ");
-            vector<string> src_ip = split_line(client_ip, ".");
             string rule = rule_arg[0];
             string rule_mod = rule_arg[1];
             string rule_ip = rule_arg[2];
@@ -228,7 +256,7 @@ bool pass_firewall(){
 
 void send_reply(unsigned char cd){
     unsigned char package[8];
-    package[0] = VN;
+    package[0] = 0;
     package[1] = cd;
     if(cur_mode == "c"){
         package[2] = dest_port / 256;
@@ -253,29 +281,33 @@ void send_reply(unsigned char cd){
         package[7] = 0;
     }
     
-    write(browser_socket, package, 8);
+    int n = write(browser_socket, package, 8);
+    cout << "send reply n = " << n << endl;
 }
 
 int redirect_msg(int src_fd, int dest_fd){
     int n;
-    memset(buffer, 0, buffersize);
-    n = read(src_fd, buffer, buffersize-1);
-    if(n < 0) {
-        cout << "src_fd read error" << endl;
+    memset(buffer, 0, BUFFER_SIZE);
+    // n = read(src_fd, buffer, sizeof(buffer));
+    while((n = recv(src_fd,buffer,sizeof(buffer),0)) <= 0){
+        sleep(100);
+        cout << "*****redirect_msg n <= 0"<< endl;
+    }
+    
+    cout << "*****redirect_msg n = " << n << endl;
+    if(n <= 0) {
+        cout << "src_fd read <=0" << endl;
         perror("read eerr");
         return -1;
-    }else if(n == 0){
-        return 0;
     }
+
     cout << "<Content>\t:" << buffer;
 
     //write back to browser client
     n = write(dest_fd, buffer, sizeof(unsigned char)*n);
-    if(n < 0){
+    if(n <= 0){
         printf("dest_fd write error\n");
         return -1;
-    }else if(n == 0){
-        return 0;
     }
     return 1;
 }
@@ -284,29 +316,24 @@ void relay_traffic(int src_socket, int dest_socket, int fdmax, fd_set &all_fds){
     cout << "relay traffic src_socket = " << src_socket << " dest_socket = " << dest_socket << endl;
     fd_set tmp_fds;
     int conn = 2;
-    while(1){
+    while(conn > 0){
         // tmp_fds = all_fds;
         FD_ZERO(&tmp_fds);
         memcpy(&tmp_fds, &all_fds, sizeof(tmp_fds));
         int dest_status, browser_status;
         if(select(fdmax+1, &tmp_fds, NULL, NULL, NULL) == -1){
-            if(errno == EINTR){
-                continue;
-            }else{
-                perror("select");
-                return;
-            }
+            perror("select");
+            return;
         }
 
         if(FD_ISSET(dest_socket, &tmp_fds)){
             //redirect msg from dest_host to browser
             cout << "redirect from dest_host" << endl;
             dest_status = redirect_msg(dest_socket, src_socket);
-            if(dest_status < 0){
-                break;
-            }else if(dest_status == 0){
+            if(dest_status <= 0){
                 conn--;
                 FD_CLR(dest_socket, &all_fds);
+                cout << "fd_CLR " << dest_socket << endl;
             }
         }
         
@@ -314,16 +341,12 @@ void relay_traffic(int src_socket, int dest_socket, int fdmax, fd_set &all_fds){
             //recv msg from browser
             cout << "redirect from browser" << endl;
             browser_status = redirect_msg(src_socket, dest_socket);
-            if(browser_status < 0){
-                break;
-            }else if(browser_status == 0){
+            if(browser_status <= 0){
                 conn--;
                 FD_CLR(src_socket, &all_fds);
+                cout << "fd_CLR " << src_socket << endl;
             }
         }
-
-        if(conn == 0)break;
-
     }
     
     close(dest_socket);
@@ -435,14 +458,17 @@ void bind_mode_handler(){
 
 void browser_handler(){
     int n;
-    char buf[buffersize];
-    //[todo] read until null
-    n = read(browser_socket,buf,8);
+    char buf[BUFFER_SIZE];
+    // n = read(browser_socket,buf,sizeof(buf));
+    n = recv(browser_socket,buf,sizeof(buf),0);
+    cout << "read n=" << n << endl;
     if(n < 8){
         printf("read sock4 error\n");
         return;
     }
-    
+    // n = readUntilNull(browser_socket, user_id, BUFFER_SIZE -1);
+    // cout << "n = " << n << " user_id = " << user_id << endl;
+    // cout << buf << endl;
     parse_socks4_request(buf);
     if(!pass_firewall()){
         //send reject reply
