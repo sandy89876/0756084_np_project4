@@ -103,7 +103,6 @@ int main(int argc, const char * argv[]){
         	exit(0);
         }else{
         	close(browser_socket);
-        	waitpid(-1, NULL, WNOHANG);
         }
     }
 }
