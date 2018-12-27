@@ -145,7 +145,7 @@ int create_conn_to_dest(){
     client_sin.sin_addr.s_addr = inet_addr(formatted_dest_ip.c_str());
     client_sin.sin_port = htons(dest_port);
     // cout << "dest_ip= " <<formatted_dest_ip << " dest_port = " << dest_port << endl;
-    if(connect(client_fd, (struct sockaddr *)&client_sin, sizeof(client_sin)+1) < 0){
+    if(connect(client_fd, (struct sockaddr *)&client_sin, sizeof(client_sin)) < 0){
         printf("connect error\nerrorno=%d",errno);
         return -1;
     }
